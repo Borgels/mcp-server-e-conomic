@@ -1,0 +1,559 @@
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { z } from 'zod/v4';
+import type { EconomicClient, HttpMethod, QueryValue } from '../economic/client.js';
+import { ECONOMIC_SERVICES, searchCapabilities, getCapability, getSchemaSummary } from '../economic/catalog.js';
+import { callEndpoint, type EndpointCallInput } from '../economic/endpoints.js';
+import { prepareOperation, verifyPreparedOperation, type PreparedOperation } from '../economic/operations.js';
+import { checkPolicy } from '../economic/policy.js';
+import { writeAuditEvent } from '../economic/audit.js';
+import { formatUnknownError } from '../errors.js';
+
+const serviceIds = ECONOMIC_SERVICES.map(service => service.id) as [string, ...string[]];
+const serviceIdSchema = z.enum(serviceIds);
+const methodSchema = z.enum(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
+const queryValueSchema = z.union([z.string(), z.number(), z.boolean(), z.null()]).optional();
+const querySchema = z.record(z.string(), queryValueSchema).optional();
+const pathParamsSchema = z.record(z.string(), z.union([z.string(), z.number()])).optional();
+
+const endpointInputSchema = z.object({
+  serviceId: serviceIdSchema,
+  method: methodSchema.default('GET'),
+  pathTemplate: z.string().trim().min(1),
+  pathParams: pathParamsSchema,
+  query: querySchema,
+  body: z.unknown().optional(),
+  idempotencyKey: z.string().trim().min(8).optional(),
+});
+
+const preparedOperationSchema = z.object({
+  capability: z.string().trim().min(1),
+  serviceId: serviceIdSchema,
+  method: methodSchema,
+  pathTemplate: z.string().trim().min(1),
+  pathParams: pathParamsSchema,
+  query: querySchema,
+  body: z.unknown().optional(),
+  dryRun: z.literal(true),
+  reason: z.string().trim().min(1),
+  operationHash: z.string().trim().min(32),
+  policyDecision: z.unknown(),
+});
+
+export function registerEconomicTools(server: McpServer, client: EconomicClient): void {
+  server.registerTool(
+    'economic_search_capabilities',
+    {
+      title: 'Search e-conomic Capabilities',
+      description:
+        'Search curated tools, schemas, and allowlisted e-conomic endpoints. Use this first when deciding which e-conomic capability to call.',
+      inputSchema: {
+        query: z.string().trim().default(''),
+        limit: z.number().int().min(1).max(100).default(20),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async input => jsonToolResult(searchCapabilities(input.query, input.limit)),
+  );
+
+  server.registerTool(
+    'economic_get_capability',
+    {
+      title: 'Get e-conomic Capability',
+      description: 'Return details for a discovered capability, tool, schema, or endpoint.',
+      inputSchema: {
+        id: z.string().trim().min(1),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async input => jsonToolResult(getCapability(input.id) ?? { error: `Unknown capability: ${input.id}` }),
+  );
+
+  server.registerTool(
+    'economic_get_schema',
+    {
+      title: 'Get e-conomic Schema Summary',
+      description:
+        'Inspect known service/resource schema metadata, including resource names and common filter/sort/pagination fields.',
+      inputSchema: {
+        serviceId: serviceIdSchema,
+        resource: z.string().trim().min(1).optional(),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async input => jsonToolResult(getSchemaSummary(input.serviceId, input.resource)),
+  );
+
+  server.registerTool(
+    'economic_check_connection',
+    {
+      title: 'Check e-conomic Connection',
+      description: 'Validate e-conomic credentials by fetching the REST API root.',
+      inputSchema: {},
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async () => jsonToolResult(await client.rest('/')),
+  );
+
+  server.registerTool(
+    'economic_get_company_context',
+    {
+      title: 'Get e-conomic Company Context',
+      description: 'Return the e-conomic REST root context, company metadata, and resource links.',
+      inputSchema: {},
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async () => jsonToolResult(await client.rest('/')),
+  );
+
+  registerReadTool(server, 'economic_search_entities', client, {
+    title: 'Search e-conomic Entities',
+    description:
+      'List or page through common e-conomic resources such as customers, suppliers, products, accounts, projects, documents, and entries.',
+  });
+
+  server.registerTool(
+    'economic_get_entity',
+    {
+      title: 'Get e-conomic Entity',
+      description: 'Fetch a single entity by service/resource/number, or by an e-conomic self URL.',
+      inputSchema: {
+        serviceId: serviceIdSchema.optional(),
+        resource: z.string().trim().min(1).optional(),
+        number: z.union([z.string().trim().min(1), z.number()]).optional(),
+        selfUrl: z.string().url().optional(),
+        query: querySchema,
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async input => {
+      if (input.selfUrl) {
+        assertEconomicUrl(input.selfUrl);
+        return jsonToolResult(await client.request({ url: input.selfUrl, query: input.query }));
+      }
+
+      if (!input.serviceId || !input.resource || input.number === undefined) {
+        throw new Error('Provide either selfUrl or serviceId, resource, and number.');
+      }
+
+      return jsonToolResult(
+        await callEndpoint(client, {
+          serviceId: input.serviceId,
+          method: 'GET',
+          pathTemplate: `/${input.resource}/{number}`,
+          pathParams: { number: input.number },
+          query: input.query,
+        }),
+      );
+    },
+  );
+
+  registerReadTool(server, 'economic_get_customer_overview', client, {
+    title: 'Get Customer Overview',
+    description: 'Read customer master data and related customer API resources.',
+    defaultServiceId: 'customers',
+    defaultResource: 'Customers',
+  });
+  registerReadTool(server, 'economic_get_supplier_overview', client, {
+    title: 'Get Supplier Overview',
+    description: 'Read supplier groups or supplier contact data.',
+    defaultServiceId: 'rest',
+    defaultResource: 'suppliers',
+  });
+  registerReadTool(server, 'economic_get_product_overview', client, {
+    title: 'Get Product Overview',
+    description: 'Read products, product groups, price groups, and sales price data.',
+    defaultServiceId: 'products',
+    defaultResource: 'products',
+  });
+  registerReadTool(server, 'economic_get_sales_document', client, {
+    title: 'Get Sales Document',
+    description: 'Read draft invoice, booked invoice line, order line, or quote line resources.',
+    defaultServiceId: 'q2c',
+    defaultResource: 'invoices/drafts',
+  });
+  registerReadTool(server, 'economic_get_accounting_entries', client, {
+    title: 'Get Accounting Entries',
+    description: 'Read draft or booked accounting entries.',
+    defaultServiceId: 'booked-entries',
+    defaultResource: 'booked-entries',
+  });
+  registerReadTool(server, 'economic_get_project_overview', client, {
+    title: 'Get Project Overview',
+    description: 'Read projects, employees, activities, and time entries.',
+    defaultServiceId: 'projects',
+    defaultResource: 'Projects',
+  });
+  registerReadTool(server, 'economic_get_document', client, {
+    title: 'Get Attached Document',
+    description: 'Read attached document metadata or PDF payloads.',
+    defaultServiceId: 'documents',
+    defaultResource: 'AttachedDocuments',
+  });
+  registerReadTool(server, 'economic_get_report', client, {
+    title: 'Get Report Data',
+    description: 'Read accounts, booked entries, budgets, and accounting-year resources for reporting.',
+    defaultServiceId: 'accounts',
+    defaultResource: 'Accounts',
+  });
+  registerReadTool(server, 'economic_reconcile_open_items', client, {
+    title: 'Reconcile Open Items',
+    description:
+      'Read and return entry data for reconciliation analysis. This tool never posts matches or payments.',
+    defaultServiceId: 'booked-entries',
+    defaultResource: 'booked-entries',
+  });
+
+  server.registerTool(
+    'economic_validate_payload',
+    {
+      title: 'Validate e-conomic Payload',
+      description: 'Validate that a candidate operation is allowlisted and report its write policy decision.',
+      inputSchema: endpointInputSchema.shape,
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async input => {
+      const method = input.method as HttpMethod;
+      const path = input.pathTemplate;
+      const decision = checkPolicy({
+        capability: 'economic_call_endpoint',
+        serviceId: input.serviceId,
+        method,
+        path,
+        body: input.body,
+      });
+      return jsonToolResult({
+        valid: true,
+        endpoint: {
+          serviceId: input.serviceId,
+          method,
+          pathTemplate: input.pathTemplate,
+        },
+        policyDecision: decision,
+      });
+    },
+  );
+
+  registerPrepareTool(server, 'economic_prepare_customer_change', {
+    capability: 'economic_prepare_customer_change',
+    title: 'Prepare Customer Change',
+    defaultServiceId: 'customers',
+    defaultCreatePath: '/Customers',
+    defaultUpdatePath: '/Customers/{number}',
+  });
+  registerPrepareTool(server, 'economic_prepare_product_change', {
+    capability: 'economic_prepare_product_change',
+    title: 'Prepare Product Change',
+    defaultServiceId: 'products',
+    defaultCreatePath: '/products',
+    defaultUpdatePath: '/products/{number}',
+  });
+  registerPrepareTool(server, 'economic_prepare_sales_document', {
+    capability: 'economic_prepare_sales_document',
+    title: 'Prepare Sales Document',
+    defaultServiceId: 'q2c',
+    defaultCreatePath: '/invoices/drafts',
+    defaultUpdatePath: '/invoices/drafts/{number}',
+  });
+  registerPrepareTool(server, 'economic_prepare_journal_entry', {
+    capability: 'economic_prepare_journal_entry',
+    title: 'Prepare Journal Entry',
+    defaultServiceId: 'journals',
+    defaultCreatePath: '/draft-entries',
+    defaultUpdatePath: '/draft-entries/{number}',
+  });
+  registerPrepareTool(server, 'economic_prepare_payment_registration', {
+    capability: 'economic_prepare_payment_registration',
+    title: 'Prepare Payment Registration',
+    defaultServiceId: 'journals',
+    defaultCreatePath: '/draft-entries',
+    defaultUpdatePath: '/draft-entries/{number}',
+  });
+
+  server.registerTool(
+    'economic_commit_prepared_operation',
+    {
+      title: 'Commit Prepared e-conomic Operation',
+      description:
+        'Execute a prepared write operation after verifying its hash, idempotency key, and policy decision.',
+      inputSchema: {
+        operation: preparedOperationSchema,
+        idempotencyKey: z.string().trim().min(8),
+        confirmOperationHash: z.string().trim().min(32),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async input => {
+      const operation = input.operation as PreparedOperation;
+      verifyPreparedOperation(operation);
+
+      if (input.confirmOperationHash !== operation.operationHash) {
+        throw new Error('confirmOperationHash must equal operation.operationHash.');
+      }
+
+      const decision = checkPolicy({
+        capability: operation.capability,
+        serviceId: operation.serviceId,
+        method: operation.method,
+        path: operation.pathTemplate,
+        body: operation.body,
+      });
+
+      await writeAuditEvent({
+        tool: 'economic_commit_prepared_operation',
+        action: 'policy_check',
+        serviceId: operation.serviceId,
+        method: operation.method,
+        path: operation.pathTemplate,
+        operationHash: operation.operationHash,
+        idempotencyKey: input.idempotencyKey,
+        allowed: decision.allowed,
+        reason: decision.reason,
+      });
+
+      if (!decision.allowed) {
+        throw new Error(`Write blocked by policy: ${decision.reason}`);
+      }
+
+      try {
+        const result = await callEndpoint(client, {
+          serviceId: operation.serviceId,
+          method: operation.method,
+          pathTemplate: operation.pathTemplate,
+          pathParams: operation.pathParams,
+          query: operation.query,
+          body: operation.body,
+          idempotencyKey: input.idempotencyKey,
+        });
+
+        await writeAuditEvent({
+          tool: 'economic_commit_prepared_operation',
+          action: 'commit',
+          serviceId: operation.serviceId,
+          method: operation.method,
+          path: operation.pathTemplate,
+          operationHash: operation.operationHash,
+          idempotencyKey: input.idempotencyKey,
+          allowed: true,
+          reason: decision.reason,
+          status: 'ok',
+        });
+
+        return jsonToolResult(result);
+      } catch (error) {
+        await writeAuditEvent({
+          tool: 'economic_commit_prepared_operation',
+          action: 'commit',
+          serviceId: operation.serviceId,
+          method: operation.method,
+          path: operation.pathTemplate,
+          operationHash: operation.operationHash,
+          idempotencyKey: input.idempotencyKey,
+          allowed: true,
+          reason: decision.reason,
+          status: 'error',
+          error: formatUnknownError(error),
+        });
+        throw error;
+      }
+    },
+  );
+
+  server.registerTool(
+    'economic_call_endpoint',
+    {
+      title: 'Call Validated e-conomic Endpoint',
+      description:
+        'Call an allowlisted e-conomic endpoint. GET calls are enabled by default; mutating calls require write policy and idempotency.',
+      inputSchema: endpointInputSchema.shape,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async input => {
+      const endpointInput = input as EndpointCallInput;
+      const decision = checkPolicy({
+        capability: 'economic_call_endpoint',
+        serviceId: endpointInput.serviceId,
+        method: endpointInput.method,
+        path: endpointInput.pathTemplate,
+        body: endpointInput.body,
+      });
+
+      if (!decision.allowed) {
+        throw new Error(`Endpoint call blocked by policy: ${decision.reason}`);
+      }
+
+      if (endpointInput.method !== 'GET' && !endpointInput.idempotencyKey) {
+        throw new Error('Mutating endpoint calls require idempotencyKey.');
+      }
+
+      return jsonToolResult(await callEndpoint(client, endpointInput));
+    },
+  );
+}
+
+function registerReadTool(
+  server: McpServer,
+  name: string,
+  client: EconomicClient,
+  options: {
+    title: string;
+    description: string;
+    defaultServiceId?: string;
+    defaultResource?: string;
+  },
+): void {
+  server.registerTool(
+    name,
+    {
+      title: options.title,
+      description: options.description,
+      inputSchema: {
+        serviceId: serviceIdSchema.default(options.defaultServiceId ?? 'rest'),
+        resource: z.string().trim().min(1).default(options.defaultResource ?? 'customers'),
+        number: z.union([z.string().trim().min(1), z.number()]).optional(),
+        paged: z.boolean().default(true),
+        query: querySchema,
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async input => {
+      const pathTemplate =
+        input.number !== undefined
+          ? `/${input.resource}/{number}`
+          : input.paged
+            ? `/${input.resource}/paged`
+            : `/${input.resource}`;
+      const pathParams = input.number === undefined ? undefined : { number: input.number };
+
+      return jsonToolResult(
+        await callEndpoint(client, {
+          serviceId: input.serviceId,
+          method: 'GET',
+          pathTemplate,
+          pathParams,
+          query: input.query,
+        }),
+      );
+    },
+  );
+}
+
+function registerPrepareTool(
+  server: McpServer,
+  name: string,
+  options: {
+    capability: string;
+    title: string;
+    defaultServiceId: string;
+    defaultCreatePath: string;
+    defaultUpdatePath: string;
+  },
+): void {
+  server.registerTool(
+    name,
+    {
+      title: options.title,
+      description:
+        'Prepare a policy-checkable dry-run write operation. This does not call e-conomic until economic_commit_prepared_operation is used.',
+      inputSchema: {
+        serviceId: serviceIdSchema.default(options.defaultServiceId),
+        method: z.enum(['POST', 'PUT', 'PATCH', 'DELETE']).default('POST'),
+        pathTemplate: z.string().trim().min(1).optional(),
+        pathParams: pathParamsSchema,
+        query: querySchema,
+        body: z.unknown().optional(),
+        reason: z.string().trim().min(1),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async input => {
+      const pathTemplate =
+        input.pathTemplate ??
+        (input.method === 'POST' ? options.defaultCreatePath : options.defaultUpdatePath);
+      return jsonToolResult(
+        prepareOperation({
+          capability: options.capability,
+          serviceId: input.serviceId,
+          method: input.method,
+          pathTemplate,
+          pathParams: input.pathParams,
+          query: input.query,
+          body: input.body,
+          reason: input.reason,
+        }),
+      );
+    },
+  );
+}
+
+function assertEconomicUrl(urlValue: string): void {
+  const url = new URL(urlValue);
+  if (!['restapi.e-conomic.com', 'apis.e-conomic.com'].includes(url.hostname)) {
+    throw new Error('selfUrl must point to restapi.e-conomic.com or apis.e-conomic.com.');
+  }
+}
+
+function jsonToolResult(data: unknown) {
+  return {
+    content: [
+      {
+        type: 'text' as const,
+        text: JSON.stringify(data, null, 2),
+      },
+    ],
+  };
+}
