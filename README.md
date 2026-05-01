@@ -41,22 +41,52 @@ export ECONOMIC_AGREEMENT_GRANT_TOKEN="your-agreement-grant-token"
 
 ### Getting Real Credentials
 
-The two e-conomic tokens come from different places:
+e-conomic's token model has three names that are easy to mix up:
 
-- `ECONOMIC_APP_SECRET_TOKEN` is the secret for your e-conomic developer app.
-  Create a developer agreement, create an app from the e-conomic developer
-  area's Apps tab, and store the App Secret Token when e-conomic shows it. It is
-  not shown again; reset it if you lose it.
-- `ECONOMIC_AGREEMENT_GRANT_TOKEN` is created when an accounting agreement user
-  grants your app access. The user opens your app's Installation URL while
-  logged into the correct e-conomic agreement and approves access.
+- App Secret Token: a private token for your app. This becomes
+  `ECONOMIC_APP_SECRET_TOKEN` and is sent as `X-AppSecretToken`.
+- App Public Token: a public app identifier used to create the Installation URL.
+  It is not sent by this MCP server on API requests.
+- Agreement Grant Token: created when an accounting agreement user grants your
+  app access. This becomes `ECONOMIC_AGREEMENT_GRANT_TOKEN` and is sent as
+  `X-AgreementGrantToken`.
+
+Create the app-side tokens first:
+
+1. Create or sign in to an e-conomic developer agreement.
+2. Open the developer area's Apps tab.
+3. Create a new app and select the roles/scopes your integration needs.
+4. Save the app and copy the App Secret Token and App Public Token.
+5. Store the App Secret Token in a password manager or secret store. Treat it as
+   a real secret; reset it in e-conomic if it is lost or exposed.
+
+Then create the agreement-side token:
+
+1. Use the app's Installation URL, or build one from the App Public Token:
+
+   ```text
+   https://secure.e-conomic.com/secure/api1/requestaccess.aspx?appPublicToken=YOUR_APP_PUBLIC_TOKEN
+   ```
+
+2. Open that URL while logged into the e-conomic agreement that should grant
+   access.
+3. Approve adding the app.
+4. Copy the shown Agreement Grant Token, or configure a redirect URL and let the
+   helper below capture it.
 
 If your e-conomic app is configured with a redirect URL, this repository includes
 a local callback helper that can capture the Agreement Grant Token after the user
 approves access:
 
 ```sh
-export ECONOMIC_INSTALLATION_URL="https://secure.e-conomic.com/secure/api1/requestaccess.aspx?..."
+export ECONOMIC_APP_PUBLIC_TOKEN="your-app-public-token"
+npm run auth:grant
+```
+
+You can also pass the full Installation URL instead:
+
+```sh
+export ECONOMIC_INSTALLATION_URL="https://secure.e-conomic.com/secure/api1/requestaccess.aspx?appPublicToken=..."
 npm run auth:grant
 ```
 

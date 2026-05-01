@@ -2,6 +2,7 @@ import { createServer, type ServerResponse } from 'node:http';
 import { URL } from 'node:url';
 
 const installationUrl = process.env.ECONOMIC_INSTALLATION_URL;
+const appPublicToken = process.env.ECONOMIC_APP_PUBLIC_TOKEN;
 const host = process.env.ECONOMIC_AUTH_CALLBACK_HOST ?? '127.0.0.1';
 const port = Number(process.env.ECONOMIC_AUTH_CALLBACK_PORT ?? 3333);
 const callbackPath = process.env.ECONOMIC_AUTH_CALLBACK_PATH ?? '/economic/grant/callback';
@@ -11,6 +12,7 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) {
 }
 
 const callbackUrl = `http://${host}:${port}${callbackPath}`;
+const resolvedInstallationUrl = installationUrl ?? (appPublicToken ? buildInstallationUrl(appPublicToken) : undefined);
 
 const server = createServer((req, res) => {
   if (!req.url) {
@@ -72,13 +74,13 @@ server.listen(port, host, () => {
   console.log('');
   console.log('In your e-conomic developer app, configure the app installation redirect URL to the callback URL above.');
 
-  if (installationUrl) {
+  if (resolvedInstallationUrl) {
     console.log('');
     console.log('Open this installation URL while logged into the e-conomic agreement that should grant access:');
-    console.log(installationUrl);
+    console.log(resolvedInstallationUrl);
   } else {
     console.log('');
-    console.log('Set ECONOMIC_INSTALLATION_URL to your app installation URL if you want this helper to print it here.');
+    console.log('Set ECONOMIC_INSTALLATION_URL or ECONOMIC_APP_PUBLIC_TOKEN if you want this helper to print the app installation URL.');
   }
 
   console.log('');
@@ -96,4 +98,10 @@ function escapeHtml(value: string): string {
 
 function escapeShell(value: string): string {
   return value.replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll('$', '\\$').replaceAll('`', '\\`');
+}
+
+function buildInstallationUrl(publicToken: string): string {
+  const url = new URL('https://secure.e-conomic.com/secure/api1/requestaccess.aspx');
+  url.searchParams.set('appPublicToken', publicToken);
+  return url.toString();
 }
