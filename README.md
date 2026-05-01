@@ -39,6 +39,40 @@ export ECONOMIC_APP_SECRET_TOKEN="your-app-secret-token"
 export ECONOMIC_AGREEMENT_GRANT_TOKEN="your-agreement-grant-token"
 ```
 
+### Getting Real Credentials
+
+The two e-conomic tokens come from different places:
+
+- `ECONOMIC_APP_SECRET_TOKEN` is the secret for your e-conomic developer app.
+  Create a developer agreement, create an app from the e-conomic developer
+  area's Apps tab, and store the App Secret Token when e-conomic shows it. It is
+  not shown again; reset it if you lose it.
+- `ECONOMIC_AGREEMENT_GRANT_TOKEN` is created when an accounting agreement user
+  grants your app access. The user opens your app's Installation URL while
+  logged into the correct e-conomic agreement and approves access.
+
+If your e-conomic app is configured with a redirect URL, this repository includes
+a local callback helper that can capture the Agreement Grant Token after the user
+approves access:
+
+```sh
+export ECONOMIC_INSTALLATION_URL="https://secure.e-conomic.com/secure/api1/requestaccess.aspx?..."
+npm run auth:grant
+```
+
+The helper prints a local callback URL such as:
+
+```text
+http://127.0.0.1:3333/economic/grant/callback
+```
+
+Configure that URL as the app installation redirect URL in e-conomic if your
+agreement/app setup allows local redirects. For shared or production onboarding,
+use the same redirect flow with a small HTTPS endpoint you control. After the
+logged-in user approves access, e-conomic redirects back with `?token=...`; the
+helper prints the matching `ECONOMIC_AGREEMENT_GRANT_TOKEN` export line. Treat
+both tokens as secrets.
+
 For GET-only demo mode, e-conomic documents that both tokens can be set to
 `demo`:
 
