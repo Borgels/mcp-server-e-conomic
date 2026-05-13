@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.2
+
+- Added Apache-2.0 `LICENSE` file and package metadata.
+- Added `SECURITY.md` with the project security contact.
+- Added GitHub Actions CI and Dependabot configuration.
+- Hardened the Streamable HTTP transport with loopback default binding,
+  optional bearer token, configurable CORS allowlist, 10 MiB default
+  request-body cap, and explicit override for controlled deployments.
+- Added package publish allowlist and `prepack` build guard.
+- Refused non-HTTPS e-conomic base URLs except loopback mocks.
+- Added transitive dependency overrides for MCP HTTP transport security alerts.
+- Updated `zod`, `vitest`, and `@types/node` to current compatible releases.
+
 ## 0.1.1
 
 - Added `npm run auth:grant` to capture an e-conomic Agreement Grant Token from
