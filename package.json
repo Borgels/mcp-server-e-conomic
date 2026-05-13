@@ -46,7 +46,7 @@
   "homepage": "https://github.com/Borgels/mcp-server-e-conomic#readme",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "zod": "^4.3.6"
+    "zod": "^4.4.3"
   },
   "overrides": {
     "ip-address": ">=10.1.1",
